@@ -81,7 +81,7 @@ def test_priority_multiplier_and_fuel() -> None:
 
 
 @pytest.mark.parametrize("zone", ["metro", "regional", "crossdock", "frontier", "island"])
-@pytest.mark.parametrize("service", ["ground", "priority", "overnight"])
+@pytest.mark.parametrize("service", ["ground", "priority", "overnight", "express"])
 def test_every_lane_is_non_negative(zone: str, service: str) -> None:
     request = QuoteRequest(
         weight_kg=Decimal("1"),

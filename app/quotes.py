@@ -19,18 +19,20 @@ BASIS_POINTS = Decimal("10000")
 MAX_WEIGHT_KG = Decimal("100")
 MAX_DIMENSION_CM = Decimal("300")
 
-ServiceLevel = Literal["ground", "priority", "overnight"]
+ServiceLevel = Literal["ground", "priority", "overnight", "express"]
 
 SERVICE_MULTIPLIER_BP: dict[str, int] = {
     "ground": 10_000,
     "priority": 14_000,
     "overnight": 20_500,
+    "express": 16_000,
 }
 
 FUEL_SURCHARGE_BP: dict[str, int] = {
     "ground": 800,
     "priority": 1_050,
     "overnight": 1_300,
+    "express": 1_150,
 }
 
 
@@ -52,7 +54,7 @@ class QuoteRequest(BaseModel):
     width_cm: Decimal = Field(description="Width in centimetres.")
     height_cm: Decimal = Field(description="Height in centimetres.")
     zone: str = Field(description="Fictional zone code.")
-    service: ServiceLevel = Field(description="ground, priority, or overnight.")
+    service: ServiceLevel = Field(description="ground, priority, overnight, or express.")
 
     @field_validator("weight_kg", "length_cm", "width_cm", "height_cm", mode="before")
     @classmethod
