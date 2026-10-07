@@ -26,7 +26,9 @@ RUN groupadd --gid 10001 ratecard \
 
 WORKDIR /app
 COPY --from=build /dist /dist
-RUN pip install --no-cache-dir /dist/*.whl \
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir /dist/*.whl \
+    && pip uninstall -y pip \
     && rm -rf /dist
 
 USER 10001
