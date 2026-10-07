@@ -1,0 +1,325 @@
+# Lint, test, build, SBOM, and vulnerability scan.
+# This workflow does not deploy anywhere. It uses the automatic GITHUB_TOKEN only.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Ruff and mypy
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          ruff check .
+          ruff format --check .
+          mypy app
+
+      - name: Install pinned actionlint and shellcheck
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          SHELLCHECK_VERSION: "0.11.0"
+          SHELLCHECK_SHA256: "b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6"
+        run: |
+          set -euo pipefail
+          tmpdir="${RUNNER_TEMP}/pf-lint-tools"
+          mkdir -p "${tmpdir}"
+          curl -fsSL -o "${tmpdir}/actionlint.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          printf '%s  %s\n' "${ACTIONLINT_SHA256}" "${tmpdir}/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "${tmpdir}/actionlint.tar.gz" -C "${tmpdir}" actionlint
+          curl -fsSL -o "${tmpdir}/shellcheck.tar.gz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz"
+          printf '%s  %s\n' "${SHELLCHECK_SHA256}" "${tmpdir}/shellcheck.tar.gz" | sha256sum -c -
+          tar -xzf "${tmpdir}/shellcheck.tar.gz" -C "${tmpdir}"
+          install -m 0755 "${tmpdir}/actionlint" /usr/local/bin/actionlint
+          install -m 0755 "${tmpdir}/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          command -v shellcheck
+          actionlint -color .github/workflows/*.yml
+
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        os: [ubuntu-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Pytest
+        env:
+          PY_VERSION: ${{ matrix.python-version }}
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          python -m pytest \
+            --cov=app \
+            --cov-fail-under=90 \
+            --cov-report=xml:"coverage-${PY_VERSION}.xml" \
+            --junitxml="junit-${PY_VERSION}.xml"
+
+      - name: Upload test reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-py${{ matrix.python-version }}
+          path: |
+            junit-${{ matrix.python-version }}.xml
+            coverage-${{ matrix.python-version }}.xml
+          if-no-files-found: error
+
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      image_id: ${{ steps.inspect.outputs.image_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build the wheel and sdist
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check build
+          python -m build
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver: docker
+
+      - name: Build the image locally
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ratecard-api:ci
+          build-args: |
+            IMAGE_SOURCE=https://github.com/${{ github.repository }}
+          # The local load exporter cannot carry provenance. The release workflow attests the pushed image.
+          provenance: false
+          sbom: false
+
+      - name: Save the image archive
+        run: |
+          set -euo pipefail
+          docker save ratecard-api:ci -o image.tar
+
+      - name: Read the local image id
+        id: inspect
+        run: |
+          set -euo pipefail
+          image_id="$(docker image inspect ratecard-api:ci --format '{{.Id}}')"
+          test -n "${image_id}"
+          printf 'image_id=%s\n' "${image_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+      - name: Upload the image archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image
+          path: image.tar
+          if-no-files-found: error
+
+  sbom:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      components: ${{ steps.count.outputs.components }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the image archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image
+          path: /tmp/pf-image
+
+      - name: Load the image
+        run: |
+          set -euo pipefail
+          archive="$(find /tmp/pf-image -name 'image.tar' -print -quit)"
+          test -n "${archive}"
+          docker load -i "${archive}"
+
+      - name: Prepare the SBOM directory
+        run: |
+          set -euo pipefail
+          mkdir -p sbom-out
+
+      - name: Source SBOM, SPDX JSON
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom-out/sbom-source.spdx.json
+          upload-artifact: false
+          dependency-snapshot: false
+
+      - name: Image SBOM, SPDX JSON
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ratecard-api:ci
+          format: spdx-json
+          output-file: sbom-out/sbom-image.spdx.json
+          upload-artifact: false
+          dependency-snapshot: false
+
+      - name: Image SBOM, CycloneDX JSON
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ratecard-api:ci
+          format: cyclonedx-json
+          output-file: sbom-out/sbom-image.cdx.json
+          upload-artifact: false
+          dependency-snapshot: false
+
+      - name: Count CycloneDX components
+        id: count
+        run: |
+          set -euo pipefail
+          components="$(python3 -c 'import json, pathlib; data = json.loads(pathlib.Path("sbom-out/sbom-image.cdx.json").read_text(encoding="utf-8")); print(len(data.get("components") or []))')"
+          printf 'components=%s\n' "${components}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: sbom-out/
+          if-no-files-found: error
+
+  scan:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Download the image archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image
+          path: /tmp/pf-image
+
+      - name: Locate the image archive
+        id: image
+        run: |
+          set -euo pipefail
+          archive="$(find /tmp/pf-image -name 'image.tar' -print -quit)"
+          test -n "${archive}"
+          printf 'archive=%s\n' "${archive}" >> "${GITHUB_OUTPUT}"
+
+      - name: Trivy scan
+        id: trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          input: ${{ steps.image.outputs.archive }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: sarif
+          output: trivy-results.sarif
+          cache: false
+
+      - name: Upload SARIF
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+      - name: Keep the scanner status
+        if: steps.trivy.outcome == 'failure'
+        run: exit 1
+
+  summary:
+    needs: [lint, test, build, sbom, scan]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write the job summary
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          SBOM_RESULT: ${{ needs.sbom.result }}
+          SCAN_RESULT: ${{ needs.scan.result }}
+          IMAGE_ID: ${{ needs.build.outputs.image_id }}
+          SBOM_COMPONENTS: ${{ needs.sbom.outputs.components }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## PipeForge CI summary"
+            echo
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "| lint | ${LINT_RESULT} |"
+            echo "| test | ${TEST_RESULT} |"
+            echo "| build | ${BUILD_RESULT} |"
+            echo "| sbom | ${SBOM_RESULT} |"
+            echo "| scan | ${SCAN_RESULT} |"
+            echo
+            echo "Local image id: ${IMAGE_ID:-unavailable}"
+            echo
+            echo "Image CycloneDX component count: ${SBOM_COMPONENTS:-unavailable}"
+          } >> "${GITHUB_STEP_SUMMARY}"

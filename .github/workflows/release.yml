@@ -1,0 +1,157 @@
+# Publish a tagged release to GHCR and GitHub Releases.
+# No server rollout. The container tags are the version and a short sha.
+# The floating tag named latest is disabled below.
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ci:
+    # Workspace-relative on purpose: actionlint 1.7.12 rejects the $/ form.
+    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository]
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+  publish:
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+      packages: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist
+
+      - name: Download SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom
+          path: sbom
+
+      - name: Download the scanned image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image
+          path: image
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Load, tag, and push the scanned image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          archive="$(find image -name 'image.tar' -print -quit)"
+          test -n "${archive}"
+          docker load -i "${archive}"
+          test -n "${TAGS}"
+          printf '%s\n' "${TAGS}" | while IFS= read -r tag; do
+            if [ -z "${tag}" ]; then
+              continue
+            fi
+            docker tag ratecard-api:ci "${tag}"
+            docker push "${tag}"
+          done
+
+      - name: Read the registry digest
+        id: digest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          first="${TAGS%%$'\n'*}"
+          test -n "${first}"
+          name="${first%%:*}"
+          digest="$(docker image inspect "${first}" --format '{{range .RepoDigests}}{{println .}}{{end}}' | head -n 1)"
+          digest="${digest##*@}"
+          case "${digest}" in
+            sha256:*) ;;
+            *)
+              echo "registry digest missing" >&2
+              exit 1
+              ;;
+          esac
+          printf 'name=%s\n' "${name}" >> "${GITHUB_OUTPUT}"
+          printf 'digest=%s\n' "${digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest the image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.digest.outputs.name }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Locate the wheel and sdist
+        id: packages
+        run: |
+          set -euo pipefail
+          wheel="$(find dist -name '*.whl' -print -quit)"
+          sdist="$(find dist -name '*.tar.gz' -print -quit)"
+          test -n "${wheel}"
+          test -n "${sdist}"
+          printf 'wheel=%s\n' "${wheel}" >> "${GITHUB_OUTPUT}"
+          printf 'sdist=%s\n' "${sdist}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest the wheel
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.packages.outputs.wheel }}
+
+      - name: Attest the sdist
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.packages.outputs.sdist }}
+
+      - name: Write SHA256SUMS
+        run: |
+          set -euo pipefail
+          find dist sbom -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*
+            sbom/*
+            SHA256SUMS
+          token: ${{ secrets.GITHUB_TOKEN }}

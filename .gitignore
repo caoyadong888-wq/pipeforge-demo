@@ -1,0 +1,13 @@
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+*.egg-info/
+.venv/
+dist/
+*.whl
+image.tar
+sbom-out/
+SHA256SUMS
