@@ -32,7 +32,6 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip uninstall -y pip \
     && rm -rf /dist
 # DEMO ONLY (do not merge): Django 3.2.0 has fixed CRITICAL/HIGH CVEs so Trivy fails the gate.
-    && rm -rf /dist
 
 USER 10001
 EXPOSE 8080
