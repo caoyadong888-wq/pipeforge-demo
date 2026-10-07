@@ -28,7 +28,10 @@ WORKDIR /app
 COPY --from=build /dist /dist
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir /dist/*.whl \
+    && pip install --no-cache-dir 'Django==3.2.0' \
     && pip uninstall -y pip \
+    && rm -rf /dist
+# DEMO ONLY (do not merge): Django 3.2.0 has fixed CRITICAL/HIGH CVEs so Trivy fails the gate.
     && rm -rf /dist
 
 USER 10001
