@@ -7,7 +7,7 @@ license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "PipeForge demo contributors" }]
 dependencies = [
-  "fastapi>=0.115,<0.116",
+  "fastapi>=0.115,<0.143",
   "uvicorn>=0.30,<0.31",
   "pydantic>=2,<3",
 ]
