@@ -26,7 +26,7 @@ Quote rules:
 - Each money step uses `ROUND_HALF_UP`, then the API returns integers.
 - Currency is the fictional rate card's `USD` denomination. It is not a live tariff.
 
-Service levels are `ground`, `priority`, and `overnight`. There is no database and no outbound call.
+Service levels are `ground`, `priority`, `overnight`, and `express`. There is no database and no outbound call.
 
 ## Pipeline
 

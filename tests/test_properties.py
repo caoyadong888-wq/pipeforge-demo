@@ -8,7 +8,7 @@ from hypothesis import strategies as st
 from app.quotes import QuoteRequest, build_quote, dimensional_weight_kg
 
 zones = st.sampled_from(["metro", "regional", "crossdock", "frontier", "island"])
-services = st.sampled_from(["ground", "priority", "overnight"])
+services = st.sampled_from(["ground", "priority", "overnight", "express"])
 weights = st.decimals(
     min_value="0.001",
     max_value="70",
